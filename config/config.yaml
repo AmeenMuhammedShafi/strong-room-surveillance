@@ -1,0 +1,59 @@
+camera:
+  source: 0
+  resolution_width: 1280
+  resolution_height: 720
+  fps: 30
+  buffer_size: 1  # Reduce latency
+
+# Detection Settings
+detection:
+  person_confidence_threshold: 0.5
+  face_confidence_threshold: 0.6
+  face_recognition_threshold: 0.6  # Lower = stricter matching
+  processing_fps: 5  # Process every Nth frame for performance
+  
+# Model Paths
+models:
+  person_detector: "models/yolov8n.onnx"
+  face_detector: "models/face_detection.onnx"
+  face_recognizer: "models/face_recognition.onnx"
+
+# Alert Settings
+alerts:
+  enable_sound: true
+  enable_email: false
+  enable_webhook: false
+  enable_logging: true
+  cooldown_seconds: 10  # Minimum time between same alert type
+  
+  # Email configuration (if enabled)
+  email:
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    sender_email: "your-email@gmail.com"
+    sender_password: "your-app-password"
+    recipient_emails:
+      - "security@company.com"
+  
+  # Webhook configuration (if enabled)
+  webhook:
+    url: "https://your-webhook-url.com/alert"
+    headers:
+      Authorization: "Bearer YOUR_TOKEN"
+
+# Database
+database:
+  face_encodings_path: "database/face_encodings.pkl"
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/surveillance.log"
+  max_file_size_mb: 50
+  backup_count: 5
+
+# Performance
+performance:
+  use_gpu: false  # Set to true if CUDA available
+  num_threads: 4
+  enable_frame_skip: true
