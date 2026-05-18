@@ -10,6 +10,7 @@ from queue import Queue
 from utils.person_detector import PersonDetector
 from utils.face_recognizer import FaceRecognizer, UserDatabase
 from utils.alert_system import AlertSystem
+from utils.tracker import PersonTracker
 
 
 class SurveillanceSystem:
@@ -39,6 +40,12 @@ class SurveillanceSystem:
         
         self.alert_system = AlertSystem(
             config=self.config['alerts']
+        )
+        
+        self.tracker = PersonTracker(
+            track_thresh=self.config['detection']['person_confidence_threshold'],
+            track_buffer=30,
+            frame_rate=self.config['camera']['fps']
         )
         
         self.processing_fps = self.config['detection']['processing_fps']
@@ -74,7 +81,10 @@ class SurveillanceSystem:
     
     def _analyze_frame(self, frame: np.ndarray) -> Dict:
         person_detections = self.person_detector.detect(frame)
-        person_count = len(person_detections)
+        
+        # Track persons across frames
+        tracked_persons = self.tracker.update(person_detections)
+        person_count = len(tracked_persons)
         
         authenticated_users = []
         unknown_faces = []
@@ -91,24 +101,77 @@ class SurveillanceSystem:
                         threshold=self.config['detection']['face_recognition_threshold']
                     )
                     
+                    # Find which tracked person this face belongs to
+                    track_id = self._find_matching_track(face_box, tracked_persons)
+                    
                     if match:
                         user_id, name, similarity = match
                         authenticated_users.append({
                             'id': user_id,
                             'name': name,
                             'similarity': similarity,
-                            'box': face_box
+                            'box': face_box,
+                            'track_id': track_id
                         })
+                        
+                        # Store identity in tracker
+                        if track_id is not None:
+                            self.tracker.set_track_identity(track_id, name, user_id)
+                            self.tracker.store_face_embedding(track_id, embedding)
                     else:
-                        unknown_faces.append(face_box)
+                        unknown_faces.append({
+                            'box': face_box,
+                            'track_id': track_id
+                        })
         
         return {
             'person_count': person_count,
-            'person_detections': person_detections,
+            'person_detections': tracked_persons,
             'authenticated_users': authenticated_users,
             'unknown_faces': unknown_faces,
             'faces_detected': len(authenticated_users) + len(unknown_faces)
         }
+    
+    def _find_matching_track(self, face_box: List, tracked_persons: List[Dict]) -> Optional[int]:
+        """Find which tracked person a face box belongs to"""
+        face_cx = (face_box[0] + face_box[2]) / 2
+        face_cy = (face_box[1] + face_box[3]) / 2
+        
+        best_match = None
+        best_iou = 0
+        
+        for person in tracked_persons:
+            x1, y1, x2, y2 = person['box']
+            # Check if face center is within person bounding box
+            if x1 <= face_cx <= x2 and y1 <= face_cy <= y2:
+                # Calculate IoU for more robust matching
+                iou = self._calculate_iou(face_box, person['box'])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match = person['track_id']
+        
+        return best_match
+    
+    @staticmethod
+    def _calculate_iou(box1: List, box2: List) -> float:
+        """Calculate Intersection over Union for two boxes"""
+        x1_min, y1_min, x1_max, y1_max = box1
+        x2_min, y2_min, x2_max, y2_max = box2
+        
+        inter_xmin = max(x1_min, x2_min)
+        inter_ymin = max(y1_min, y2_min)
+        inter_xmax = min(x1_max, x2_max)
+        inter_ymax = min(y1_max, y2_max)
+        
+        if inter_xmax < inter_xmin or inter_ymax < inter_ymin:
+            return 0.0
+        
+        inter_area = (inter_xmax - inter_xmin) * (inter_ymax - inter_ymin)
+        box1_area = (x1_max - x1_min) * (y1_max - y1_min)
+        box2_area = (x2_max - x2_min) * (y2_max - y2_min)
+        union_area = box1_area + box2_area - inter_area
+        
+        return inter_area / union_area if union_area > 0 else 0.0
     
     def _evaluate_security_status(self, analysis: Dict):
         person_count = analysis['person_count']
@@ -175,19 +238,25 @@ class SurveillanceSystem:
         
         for det in analysis['person_detections']:
             x1, y1, x2, y2 = det['box']
+            track_id = det.get('track_id', -1)
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(overlay, f"ID:{track_id}", (x1, y1 - 25),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
         for user in analysis['authenticated_users']:
             x1, y1, x2, y2 = user['box']
+            track_id = user.get('track_id', -1)
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            label = f"{user['name']} ({user['similarity']:.2f})"
+            label = f"{user['name']} (ID:{track_id}) ({user['similarity']:.2f})"
             cv2.putText(overlay, label, (x1, y1 - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
-        for face_box in analysis['unknown_faces']:
+        for face_obj in analysis['unknown_faces']:
+            face_box = face_obj['box']
+            track_id = face_obj.get('track_id', -1)
             x1, y1, x2, y2 = face_box
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(overlay, "UNKNOWN", (x1, y1 - 10),
+            cv2.putText(overlay, f"UNKNOWN (ID:{track_id})", (x1, y1 - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         
         self._draw_status_panel(overlay, analysis)
