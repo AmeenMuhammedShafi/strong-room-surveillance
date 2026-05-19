@@ -90,39 +90,40 @@ class SurveillanceSystem:
         unknown_faces = []
         
         if person_count > 0:
-            faces = self.face_recognizer.detect_faces(frame)
+            # Get all faces and embeddings in one pass
+            face_data = self.face_recognizer.get_all_face_embeddings(frame)
             
-            for face_box in faces:
-                embedding = self.face_recognizer.get_face_embedding(frame, face_box)
+            for face_info in face_data:
+                face_box = face_info['box']
+                embedding = face_info['embedding']
                 
-                if embedding is not None:
-                    match = self.user_db.identify_user(
-                        embedding, 
-                        threshold=self.config['detection']['face_recognition_threshold']
-                    )
+                match = self.user_db.identify_user(
+                    embedding, 
+                    threshold=self.config['detection']['face_recognition_threshold']
+                )
+                
+                # Find which tracked person this face belongs to
+                track_id = self._find_matching_track(face_box, tracked_persons)
+                
+                if match:
+                    user_id, name, similarity = match
+                    authenticated_users.append({
+                        'id': user_id,
+                        'name': name,
+                        'similarity': similarity,
+                        'box': face_box,
+                        'track_id': track_id
+                    })
                     
-                    # Find which tracked person this face belongs to
-                    track_id = self._find_matching_track(face_box, tracked_persons)
-                    
-                    if match:
-                        user_id, name, similarity = match
-                        authenticated_users.append({
-                            'id': user_id,
-                            'name': name,
-                            'similarity': similarity,
-                            'box': face_box,
-                            'track_id': track_id
-                        })
-                        
-                        # Store identity in tracker
-                        if track_id is not None:
-                            self.tracker.set_track_identity(track_id, name, user_id)
-                            self.tracker.store_face_embedding(track_id, embedding)
-                    else:
-                        unknown_faces.append({
-                            'box': face_box,
-                            'track_id': track_id
-                        })
+                    # Store identity in tracker
+                    if track_id is not None:
+                        self.tracker.set_track_identity(track_id, name, user_id)
+                        self.tracker.store_face_embedding(track_id, embedding)
+                else:
+                    unknown_faces.append({
+                        'box': face_box,
+                        'track_id': track_id
+                    })
         
         return {
             'person_count': person_count,

@@ -43,6 +43,23 @@ class FaceRecognizer:
 
         return boxes
 
+    def get_all_face_embeddings(self, image):
+        """Get all face boxes and embeddings from image in one pass"""
+        faces = self.app.get(image)
+        
+        results = []
+        for face in faces:
+            bbox = face.bbox.astype(int)
+            x1, y1, x2, y2 = bbox
+            
+            embedding = face.embedding / np.linalg.norm(face.embedding)
+            results.append({
+                'box': (x1, y1, x2, y2),
+                'embedding': embedding
+            })
+        
+        return results
+
     def get_face_embedding(self, image, face_box=None):
 
         faces = self.app.get(image)
@@ -50,7 +67,30 @@ class FaceRecognizer:
         if len(faces) == 0:
             return None
 
-        embedding = faces[0].embedding
+        # If face_box provided, match it to the correct detected face
+        if face_box is not None:
+            x1, y1, x2, y2 = face_box
+            face_cx = (x1 + x2) / 2
+            face_cy = (y1 + y2) / 2
+            
+            best_match = 0
+            best_distance = float('inf')
+            
+            for idx, face in enumerate(faces):
+                bbox = face.bbox.astype(int)
+                det_x1, det_y1, det_x2, det_y2 = bbox
+                det_cx = (det_x1 + det_x2) / 2
+                det_cy = (det_y1 + det_y2) / 2
+                
+                distance = np.sqrt((face_cx - det_cx)**2 + (face_cy - det_cy)**2)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_match = idx
+            
+            embedding = faces[best_match].embedding
+        else:
+            # If no face_box provided, use first face
+            embedding = faces[0].embedding
 
         embedding = embedding / np.linalg.norm(embedding)
 
@@ -146,6 +186,15 @@ class UserDatabase:
                 if similarity > best_similarity:
                     best_similarity = similarity
                     best_match = (user_id, user_data['name'], similarity)
+        
+        # Debug: Show similarity scores
+        if not best_match:
+            scores = []
+            for user_id, user_data in self.users.items():
+                max_sim = max([np.dot(embedding, e) for e in user_data['embeddings']])
+                scores.append(f"{user_data['name']}: {max_sim:.4f}")
+            if scores:
+                print(f"  [DEBUG] No match (threshold={threshold:.2f}): {', '.join(scores)}")
         
         return best_match
     

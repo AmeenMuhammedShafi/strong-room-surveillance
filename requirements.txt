@@ -7,3 +7,5 @@ ultralytics==8.0.196
 insightface==0.7.3
 scikit-learn==1.3.2
 scipy==1.11.4
+lap==0.4.0
+cython-bbox==0.1.3
