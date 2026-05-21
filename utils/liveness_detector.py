@@ -95,7 +95,7 @@ class ProductionLivenessDetector:
 
     def _analyze_motion_flow(self, gray: np.ndarray, track_id: int) -> float:
         """Calculates true localized optical displacement between frames."""
-        score = 0.5 
+        score = 0.3  # Default: assume static/spoofed
         
         if track_id in self.prev_gray_frames:
             prev_gray = self.prev_gray_frames[track_id]
@@ -116,10 +116,16 @@ class ProductionLivenessDetector:
             if len(self.motion_history[track_id]) > 3:
                 # Live targets yield fluctuating velocity curves; static targets display flatlines
                 std_dev = np.std(self.motion_history[track_id])
-                score = min(std_dev * 15.0, 1.0)
-                if score < 0.15 and np.mean(self.motion_history[track_id]) > 2.0:
-                    # Catch uniform translation attacks (moving a print paper smoothly across space)
-                    score = 0.10
+                mean_motion_val = np.mean(self.motion_history[track_id])
+                
+                # STRICTER: Require meaningful motion variance AND magnitude
+                # Spoofed photos/screens have very low or zero motion
+                if mean_motion_val < 0.5:
+                    score = 0.1  # Likely static spoof
+                elif std_dev < 0.3:
+                    score = 0.15  # Low variance = static attack
+                else:
+                    score = min((std_dev * 20.0) + (mean_motion_val * 5.0), 1.0)
         
         self.prev_gray_frames[track_id] = gray
         return float(score)
@@ -152,14 +158,15 @@ class LivenessAnalyzer:
             self.liveness_history[track_id] = []
         
         self.liveness_history[track_id].append(result['is_live'])
-        self.liveness_history[track_id] = self.liveness_history[track_id][-5:]  # Extended pool
+        self.liveness_history[track_id] = self.liveness_history[track_id][-5:]  # Keep last 5 frames
         
         if len(self.liveness_history[track_id]) >= 3:
             live_count = sum(self.liveness_history[track_id])
-            # Require at least 60% of current window frames to evaluate as true
-            consensus = live_count >= len(self.liveness_history[track_id]) * 0.6
+            # STRICT: Require 80%+ of window frames to be live (spoofing must be detected as spoof consistently)
+            consensus = live_count >= len(self.liveness_history[track_id]) * 0.80
             result['consensus_live'] = consensus
         else:
+            # During warmup, require the latest frame to be live (no benefit of doubt)
             result['consensus_live'] = result['is_live']
         
         return result
