@@ -11,6 +11,7 @@ from utils.person_detector import PersonDetector
 from utils.face_recognizer import FaceRecognizer, UserDatabase
 from utils.alert_system import AlertSystem
 from utils.tracker import ByteTracker
+from utils.liveness_detector import LivenessAnalyzer
 
 
 class SurveillanceSystem:
@@ -44,6 +45,12 @@ class SurveillanceSystem:
         self.alert_system = AlertSystem(
             config=self.config['alerts']
         )
+        
+        # Liveness Detection - Anti-Spoofing
+        self.liveness_analyzer = LivenessAnalyzer(
+            config=self.config.get('liveness', {})
+        )
+        self.spoof_alert_cooldown = {}  # track_id -> last_spoof_alert_time
         
         self.tracker = ByteTracker(
             track_thresh=self.config['detection']['person_confidence_threshold'],
@@ -102,6 +109,8 @@ class SurveillanceSystem:
         
         authenticated_users = []
         unknown_faces = []
+        spoofed_faces = []
+        liveness_data = {}  # track_id -> liveness result
         
         if person_count > 0:
             face_data = self.face_recognizer.get_all_face_embeddings(frame)
@@ -109,13 +118,53 @@ class SurveillanceSystem:
             for face_info in face_data:
                 face_box = face_info['box']
                 embedding = face_info['embedding']
+                x1, y1, x2, y2 = [int(v) for v in face_box]
                 
+                # Extract face frame for liveness analysis
+                face_frame = frame[y1:y2, x1:x2].copy() if (y1 < y2 and x1 < x2) else frame
+                
+                track_id = self._find_matching_track(face_box, tracked_persons)
+                
+                # === LIVENESS DETECTION (Critical Security Gate) ===
+                liveness_enabled = self.config.get('liveness', {}).get('enabled', True)
+                liveness_result = None
+                
+                if liveness_enabled and face_frame.size > 0:
+                    try:
+                        liveness_result = self.liveness_analyzer.check_face_liveness(
+                            face_frame, face_box, track_id or -1, embedding
+                        )
+                        liveness_data[track_id or -1] = liveness_result
+                        
+                        is_live = liveness_result.get('consensus_live', liveness_result.get('is_live', False))
+                        
+                        if not is_live:
+                            # SPOOFING DETECTED - Log and alert
+                            spoof_type = liveness_result.get('spoof_type', 'UNKNOWN_SPOOF')
+                            spoofed_faces.append({
+                                'box': face_box,
+                                'track_id': track_id,
+                                'spoof_type': spoof_type,
+                                'liveness_score': liveness_result.get('liveness_score', 0)
+                            })
+                            
+                            # Rate-limited spoofing alerts
+                            if self._should_send_spoof_alert(track_id):
+                                self.alert_system.send_alert(
+                                    AlertSystem.ALERT_SPOOFING_DETECTED,
+                                    f"SPOOFING ATTACK DETECTED: {spoof_type} (Liveness: {liveness_result['liveness_score']:.2f})",
+                                    data={'track_id': track_id, 'spoof_type': spoof_type, 'liveness_score': liveness_result['liveness_score']}
+                                )
+                            continue  # Skip recognition for spoofed faces
+                    except Exception as e:
+                        print(f"[ERROR] Liveness check failed: {e}")
+                        # Fall through to recognition if liveness check fails
+                
+                # === FACE RECOGNITION (Only for Live Faces) ===
                 match = self.user_db.identify_user(
                     embedding, 
                     threshold=self.config['detection']['face_recognition_threshold']
                 )
-                
-                track_id = self._find_matching_track(face_box, tracked_persons)
                 
                 if match:
                     user_id, name, similarity = match
@@ -124,7 +173,9 @@ class SurveillanceSystem:
                         'name': name,
                         'similarity': similarity,
                         'box': face_box,
-                        'track_id': track_id
+                        'track_id': track_id,
+                        'liveness_score': liveness_result['liveness_score'] if liveness_result else 1.0,
+                        'is_live': True
                     })
                     
                     if track_id is not None:
@@ -133,7 +184,9 @@ class SurveillanceSystem:
                 else:
                     unknown_faces.append({
                         'box': face_box,
-                        'track_id': track_id
+                        'track_id': track_id,
+                        'liveness_score': liveness_result['liveness_score'] if liveness_result else 1.0,
+                        'is_live': True
                     })
         
         return {
@@ -141,8 +194,24 @@ class SurveillanceSystem:
             'person_detections': tracked_persons,
             'authenticated_users': authenticated_users,
             'unknown_faces': unknown_faces,
-            'faces_detected': len(authenticated_users) + len(unknown_faces)
+            'spoofed_faces': spoofed_faces,
+            'liveness_data': liveness_data,
+            'faces_detected': len(authenticated_users) + len(unknown_faces) + len(spoofed_faces)
         }
+    
+    def _should_send_spoof_alert(self, track_id: Optional[int]) -> bool:
+        """Rate-limit spoofing alerts to prevent spam."""
+        if track_id is None:
+            return True
+        
+        spoof_cooldown = self.config.get('liveness', {}).get('spoof_cooldown', 30)
+        current_time = time.time()
+        
+        last_alert = self.spoof_alert_cooldown.get(track_id, 0)
+        if current_time - last_alert >= spoof_cooldown:
+            self.spoof_alert_cooldown[track_id] = current_time
+            return True
+        return False
     
     def _find_matching_track(self, face_box: List, tracked_persons: List[Dict]) -> Optional[int]:
         face_cx = (face_box[0] + face_box[2]) / 2
@@ -232,11 +301,12 @@ class SurveillanceSystem:
         # Track map arrays to isolate and prevent double-drawing over person boundaries
         identified_track_ids = {u['track_id'] for u in analysis['authenticated_users'] if u['track_id'] is not None}
         unknown_track_ids = {f['track_id'] for f in analysis['unknown_faces'] if f['track_id'] is not None}
+        spoofed_track_ids = {f['track_id'] for f in analysis.get('spoofed_faces', []) if f['track_id'] is not None}
         
         # 1. Outer Person Boundaries (Draw ONLY if identity recognition skipped/failed for track)
         for det in analysis['person_detections']:
             track_id = det.get('track_id', -1)
-            if track_id not in identified_track_ids and track_id not in unknown_track_ids:
+            if track_id not in identified_track_ids and track_id not in unknown_track_ids and track_id not in spoofed_track_ids:
                 x1, y1, x2, y2 = det['box']
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 165, 0), 1)
                 cv2.putText(overlay, f"Locating ID:{track_id}", (x1, y1 - 10),
@@ -246,8 +316,9 @@ class SurveillanceSystem:
         for user in analysis['authenticated_users']:
             x1, y1, x2, y2 = user['box']
             track_id = user.get('track_id', -1)
+            liveness_score = user.get('liveness_score', 1.0)
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            label = f"{user['name']} [ID:{track_id}] ({user['similarity']:.2f})"
+            label = f"{user['name']} [ID:{track_id}] ({user['similarity']:.2f}) [L:{liveness_score:.2f}]"
             cv2.putText(overlay, label, (x1, y1 - 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
@@ -255,16 +326,31 @@ class SurveillanceSystem:
         for face_obj in analysis['unknown_faces']:
             x1, y1, x2, y2 = face_obj['box']
             track_id = face_obj.get('track_id', -1)
+            liveness_score = face_obj.get('liveness_score', 1.0)
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(overlay, f"BREACH [ID:{track_id}]", (x1, y1 - 10),
+            cv2.putText(overlay, f"BREACH [ID:{track_id}] [L:{liveness_score:.2f}]", (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        
+        # 4. Spoofed/Fake Faces (Purple - Critical Security Flag)
+        for spoof_obj in analysis.get('spoofed_faces', []):
+            x1, y1, x2, y2 = spoof_obj['box']
+            track_id = spoof_obj.get('track_id', -1)
+            spoof_type = spoof_obj.get('spoof_type', 'UNKNOWN')
+            liveness_score = spoof_obj.get('liveness_score', 0)
+            
+            # Double-thickness box for critical alert
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 0, 255), 3)
+            cv2.putText(overlay, f"SPOOF: {spoof_type}", (x1, y1 - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+            cv2.putText(overlay, f"[ID:{track_id}] [L:{liveness_score:.2f}]", (x1, y1 - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
         
         self._draw_status_panel(overlay, analysis)
         return overlay
     
     def _draw_status_panel(self, frame: np.ndarray, analysis: Dict):
         h, w = frame.shape[:2]
-        panel_height = 140
+        panel_height = 160
         
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, 0), (w, panel_height), (10, 10, 10), -1)
@@ -273,12 +359,16 @@ class SurveillanceSystem:
         person_count = analysis['person_count']
         auth_count = len(analysis['authenticated_users'])
         unknown_count = len(analysis['unknown_faces'])
+        spoof_count = len(analysis.get('spoofed_faces', []))
         
-        if person_count == 0:
+        # Determine status based on security posture
+        if spoof_count > 0:
+            status, color = "CRITICAL: SPOOFING DETECTED", (255, 0, 255)
+        elif person_count == 0:
             status, color = "SECURE BASELINE", (0, 255, 0)
         elif person_count == 1:
             status, color = "VIOLATION: SINGLE OCCUPANCY", (0, 165, 255)
-        elif person_count == 2 and auth_count == 2 and unknown_count == 0:
+        elif person_count == 2 and auth_count == 2 and unknown_count == 0 and spoof_count == 0:
             status, color = "DUAL-AUTH VERIFIED", (0, 255, 0)
         elif person_count == 2:
             status, color = "CRITICAL: INTRUSION DETECTED", (0, 0, 255)
@@ -291,10 +381,15 @@ class SurveillanceSystem:
         cv2.putText(frame, f"Active Tracks: {person_count}", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
         cv2.putText(frame, f"Authenticated: {auth_count}", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
         cv2.putText(frame, f"Unknown: {unknown_count}", (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 1)
+        cv2.putText(frame, f"Spoofed: {spoof_count}", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 255), 1)
         
         if analysis['authenticated_users']:
             users = ', '.join([u['name'] for u in analysis['authenticated_users']])
             cv2.putText(frame, f"Clearance Logs: {users}", (240, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        
+        if spoof_count > 0:
+            spoof_types = ', '.join(set([s.get('spoof_type', 'UNKNOWN') for s in analysis.get('spoofed_faces', [])]))
+            cv2.putText(frame, f"Attack Types: {spoof_types}", (240, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
 
     def run(self):
         camera_source = self.config['camera']['source']

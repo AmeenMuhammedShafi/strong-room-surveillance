@@ -41,6 +41,19 @@ alerts:
     headers:
       Authorization: "Bearer YOUR_TOKEN"
 
+# Liveness Detection Settings
+liveness:
+  enabled: true
+  threshold: 0.35  # 0-1, higher = stricter. LOWERED for real camera conditions
+  texture_analysis: true
+  motion_detection: true
+  frequency_analysis: true
+  blink_detection: true
+  consensus_frames: 3  # Require N consecutive live detections before accepting (lowered from 5)
+  min_motion_frames: 2  # Minimum frames before motion detection kicks in
+  alert_on_spoof: true
+  spoof_cooldown: 30  # Seconds between spoof alerts for same track
+
 # Database
 database:
   face_encodings_path: "database/face_encodings.pkl"

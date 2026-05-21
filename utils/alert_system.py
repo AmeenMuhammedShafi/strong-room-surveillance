@@ -11,6 +11,7 @@ class AlertSystem:
     ALERT_UNAUTHORIZED = "UNAUTHORIZED_ACCESS"
     ALERT_EXCESS_PEOPLE = "EXCESS_PEOPLE"
     ALERT_AUTH_SUCCESS = "AUTHORIZED_ACCESS"
+    ALERT_SPOOFING_DETECTED = "SPOOFING_DETECTED"
     
     def __init__(self, config: dict):
         self.config = config
@@ -30,7 +31,7 @@ class AlertSystem:
             self.webhook_url = config.get('webhook', {}).get('url')
             self.webhook_headers = config.get('webhook', {}).get('headers', {})
         
-        print("✓ Alert system initialized")
+        print("[OK] Alert system initialized")
     
     def _setup_logging(self):
         """Setup file logging"""
