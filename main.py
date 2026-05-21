@@ -11,7 +11,7 @@ from utils.person_detector import PersonDetector
 from utils.face_recognizer import FaceRecognizer, UserDatabase
 from utils.alert_system import AlertSystem
 from utils.tracker import ByteTracker
-from utils.liveness_detector import LivenessAnalyzer
+from utils.live_detector import LiveAnalyzer
 
 
 class SurveillanceSystem:
@@ -46,9 +46,10 @@ class SurveillanceSystem:
             config=self.config['alerts']
         )
         
-        # Liveness Detection - Anti-Spoofing
-        self.liveness_analyzer = LivenessAnalyzer(
-            config=self.config.get('liveness', {})
+        # Live Detection - Production-grade with Head Pose, Blink, Gaze, and Landmark Analysis
+        self.live_analyzer = LiveAnalyzer(
+            consensus_frames=self.config.get('liveness', {}).get('consensus_frames', 5),
+            consensus_threshold=self.config.get('liveness', {}).get('consensus_threshold', 0.60)
         )
         self.spoof_alert_cooldown = {}  # track_id -> last_spoof_alert_time
         
@@ -131,34 +132,43 @@ class SurveillanceSystem:
                 
                 if liveness_enabled and face_frame.size > 0:
                     try:
-                        liveness_result = self.liveness_analyzer.check_face_liveness(
-                            face_frame, face_box, track_id or -1, embedding
-                        )
+                        liveness_result = self.live_analyzer.check_face_liveness(face_frame)
                         liveness_data[track_id or -1] = liveness_result
                         
-                        is_live = liveness_result.get('consensus_live', liveness_result.get('is_live', False))
+                        is_live = liveness_result.get('is_live', False)
                         
                         if not is_live:
                             # SPOOFING DETECTED - Log and alert
-                            spoof_type = liveness_result.get('spoof_type', 'UNKNOWN_SPOOF')
+                            spoof_type = "NON_LIVE_DETECTION"
+                            consensus_score = liveness_result.get('consensus_score', 0)
                             spoofed_faces.append({
                                 'box': face_box,
                                 'track_id': track_id,
                                 'spoof_type': spoof_type,
-                                'liveness_score': liveness_result.get('liveness_score', 0)
+                                'liveness_score': consensus_score
                             })
                             
                             # Rate-limited spoofing alerts
                             if self._should_send_spoof_alert(track_id):
+                                detection_details = liveness_result.get('detection', {})
+                                method_scores = detection_details.get('method_scores', {})
                                 self.alert_system.send_alert(
                                     AlertSystem.ALERT_SPOOFING_DETECTED,
-                                    f"SPOOFING ATTACK DETECTED: {spoof_type} (Liveness: {liveness_result['liveness_score']:.2f})",
-                                    data={'track_id': track_id, 'spoof_type': spoof_type, 'liveness_score': liveness_result['liveness_score']}
+                                    f"NON-LIVE DETECTION: Consensus {consensus_score:.1%} | "
+                                    f"HeadPose: {method_scores.get('head_pose', 0):.2f} | "
+                                    f"Blink: {method_scores.get('blink', 0):.2f} | "
+                                    f"Gaze: {method_scores.get('gaze', 0):.2f}",
+                                    data={
+                                        'track_id': track_id,
+                                        'spoof_type': spoof_type,
+                                        'consensus_score': consensus_score,
+                                        'method_scores': method_scores
+                                    }
                                 )
-                            continue  # Skip recognition for spoofed faces
+                            continue  # Skip recognition for non-live faces
                     except Exception as e:
-                        print(f"[ERROR] Liveness check failed: {e}")
-                        # Fall through to recognition if liveness check fails
+                        print(f"[ERROR] Live detection check failed: {e}")
+                        # Fall through to recognition if live detection check fails
                 
                 # === FACE RECOGNITION (Only for Live Faces) ===
                 match = self.user_db.identify_user(
@@ -168,13 +178,14 @@ class SurveillanceSystem:
                 
                 if match:
                     user_id, name, similarity = match
+                    liveness_score = liveness_result.get('consensus_score', 1.0) if liveness_result else 1.0
                     authenticated_users.append({
                         'id': user_id,
                         'name': name,
                         'similarity': similarity,
                         'box': face_box,
                         'track_id': track_id,
-                        'liveness_score': liveness_result['liveness_score'] if liveness_result else 1.0,
+                        'liveness_score': liveness_score,
                         'is_live': True
                     })
                     
@@ -182,10 +193,11 @@ class SurveillanceSystem:
                         self.tracker.set_track_identity(track_id, name, user_id)
                         self.tracker.store_face_embedding(track_id, embedding)
                 else:
+                    liveness_score = liveness_result.get('consensus_score', 1.0) if liveness_result else 1.0
                     unknown_faces.append({
                         'box': face_box,
                         'track_id': track_id,
-                        'liveness_score': liveness_result['liveness_score'] if liveness_result else 1.0,
+                        'liveness_score': liveness_score,
                         'is_live': True
                     })
         

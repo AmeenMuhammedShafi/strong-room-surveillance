@@ -45,18 +45,30 @@ alerts:
     headers:
       Authorization: "Bearer YOUR_TOKEN"
 
-# Liveness Detection Settings
+# Live Detection Settings (Production-Grade: Head Pose + Blink + Gaze + Landmark Motion)
 liveness:
   enabled: true
-  threshold: 0.40  # Stricter: require higher score to pass (photos/screens have trouble reaching this)
-  texture_analysis: true
-  motion_detection: true
-  frequency_analysis: true
-  blink_detection: true
-  consensus_frames: 3
-  min_motion_frames: 2
+  
+  # Detection Methods (Weighted Combination)
+  # - head_pose: 40% (Primary - detects natural head rotation)
+  # - blink: 20% (Supporting - detects eye closure events)
+  # - gaze: 20% (Supporting - detects eye movement/pupil position)
+  # - landmark_motion: 20% (Supporting - detects micro-expressions)
+  
+  # Temporal Consensus Parameters
+  consensus_frames: 5  # Analyze 5 frames for robust decision
+  consensus_threshold: 0.60  # 60% of frames must be LIVE (3 of 5 frames)
+  
+  # Decision Threshold
+  liveness_threshold: 0.45  # Individual frame liveness score threshold
+  
+  # Alert Management
   alert_on_spoof: true
-  spoof_cooldown: 30
+  spoof_cooldown: 30  # Prevent spoof alert spam from same person
+  
+  # MediaPipe Face Mesh Configuration
+  max_history: 30  # Frame history for temporal analysis
+  verbose: false  # Detailed logging (set to true for debugging)
 
 # Database
 database:
